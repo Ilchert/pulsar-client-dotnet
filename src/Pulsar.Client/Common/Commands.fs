@@ -14,7 +14,8 @@ open System.Net
 open Pulsar.Client.Internal
 open Pulsar.Client.Api
 open Pulsar.Client.Common
-
+open System.IO.Pipelines
+open Pulsar.Client.Proto
 
 type CommandType = BaseCommand.Type
 
@@ -45,64 +46,14 @@ let private serializeSimpleCommand (command : BaseCommand) =
     ),  command.``type``
 
 
-let private serializePayloadCommand (command : BaseCommand) (metadata: MessageMetadata) (payload: MemoryStream) =
-    (fun output ->
-        let temp = MemoryStreamManager.GetStream() :?> RecyclableMemoryStream
-        let binaryWriter = new BinaryWriter(temp)
-
-        // write fake totalLength
-        for i in 1..4 do
-            temp.WriteByte(0uy)
-
-        // write commandPayload
-        Serializer.SerializeWithLengthPrefix(temp, command, PrefixStyle.Fixed32BigEndian)
-
-        let stream1Size = int temp.Length
-
-        // write magic number 0x0e01
-        temp.WriteByte(14uy)
-        temp.WriteByte(1uy)
-
-        // write fake CRC sum
-        for i in 1..4 do
-            temp.WriteByte(0uy)
-
-        // write metadata
-        Serializer.SerializeWithLengthPrefix(temp, metadata, PrefixStyle.Fixed32BigEndian)
-        let stream2Size = int temp.Length
-        let totalMetadataSize = stream2Size - stream1Size - 6
-
-        // write payload
-        payload.Seek(0L, SeekOrigin.Begin) |> ignore
-        payload.CopyTo(temp)
-
-        let frameSize = int temp.Length
-        let totalSize = frameSize - 4
-        let payloadSize = frameSize - stream2Size
-
-        let crcStart = stream1Size + 2
-        let crcPayloadStart = crcStart + 4
-
-        // write CRC
-        temp.Seek(int64 crcPayloadStart, SeekOrigin.Begin) |> ignore
-        let crc = int32 <| CRC32C.GetForRMS(temp, totalMetadataSize + payloadSize)
-        temp.Seek(int64 crcStart, SeekOrigin.Begin) |> ignore
-        binaryWriter.Write(int32ToBigEndian crc)
-
-        // write total size
-        temp.Seek(0L, SeekOrigin.Begin) |> ignore
-        binaryWriter.Write(int32ToBigEndian totalSize)
-
-        temp.Seek(0L, SeekOrigin.Begin) |> ignore
-        backgroundTask {
-            try
-                return! temp.CopyToAsync(output)
-            finally
-                payload.Dispose()
-                temp.Dispose()
-                binaryWriter.Dispose()
-        } :> Task
-    ), command.``type``
+let private serializePayloadCommand (command: BaseCommand) (metadata: MessageMetadata) (payload: MemoryStream) =
+    (fun (output: Stream) ->
+        let writer = PipeWriter.Create(output, new StreamPipeWriterOptions(leaveOpen = true))
+        CommandSerializer.WritePayloadCommand(writer, command, metadata, payload)
+        payload.Dispose()
+        writer.CompleteAsync().AsTask()
+        ),
+    command.``type``
 
 let newPartitionMetadataRequest (topicName : CompleteTopicName) (requestId : RequestId) =
     let request = CommandPartitionedTopicMetadata(Topic = %topicName, RequestId = %requestId)
