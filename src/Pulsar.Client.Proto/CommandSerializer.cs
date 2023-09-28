@@ -5,8 +5,6 @@ using System;
 using System.Buffers;
 using System.Buffers.Binary;
 using System.IO;
-using System.IO.Pipelines;
-using System.Threading.Tasks;
 
 namespace Pulsar.Client.Proto
 {
@@ -17,56 +15,53 @@ namespace Pulsar.Client.Proto
         // all numbers are big endian
         // |4 byte total length| 4 bytes command length|command|2 bytes magic number 0x0e01|4 bytes CRC32C|4 bytes metadata length|metadata|payload|
 
-        public static ValueTask WritePayloadCommand(Stream stream, BaseCommand command, MessageMetadata metadata, MemoryStream payload)
+        public static void WritePayloadCommand(IBufferWriter<byte> bufferWriter, BaseCommand command, MessageMetadata metadata, MemoryStream payload)
         {
             // prepare crc data
             using var metadataMeasure = Serializer.Measure(metadata);
+            using var commandMeasure = Serializer.Measure(command);
 
-            var crc32Length = 4 + (int)metadataMeasure.Length + (int)payload.Length;
-            using var crc32Buffer = MemoryPool<byte>.Shared.Rent(crc32Length);
+            var crc32Length = 4 + 4 + (int)metadataMeasure.Length + (int)payload.Length;
+            var totalLength = 4 + (int)commandMeasure.Length + 2 + crc32Length;
+
+            Span<byte> lengthBuffer = stackalloc byte[4];
+
+            // write total length
+            BinaryPrimitives.WriteInt32BigEndian(lengthBuffer, totalLength);
+            bufferWriter.Write(lengthBuffer);
+
+            // write command length
+            BinaryPrimitives.WriteInt32BigEndian(lengthBuffer, (int)commandMeasure.Length);
+            bufferWriter.Write(lengthBuffer);
+
+            // write command
+            commandMeasure.Serialize(bufferWriter);
+
+            // write magic number
+            bufferWriter.Write(s_magicNumber);
+
+            var crc32Buffer = bufferWriter.GetMemory(crc32Length)[..crc32Length];
+            var crc32Data = crc32Buffer[4..];
+
             // write metadata length
-            BinaryPrimitives.WriteInt32BigEndian(crc32Buffer.Memory.Span, (int)metadataMeasure.Length);
+            BinaryPrimitives.WriteInt32BigEndian(crc32Data.Span, (int)metadataMeasure.Length);
 
-            var crc32BufferWriter = new MemoryBufferWriter(crc32Buffer.Memory[4..]);
+            var crc32MetadataStart = crc32Data[4..];
+            var crc32BufferWriter = new MemoryBufferWriter(crc32MetadataStart);
 
             // write metadata
             metadataMeasure.Serialize(crc32BufferWriter);
 
             // write payload
-            var payloadSpan = crc32BufferWriter.GetSpan();
-            payload.Seek(0, SeekOrigin.Begin);
-            payload.ReadExactly(payloadSpan[..(int)payload.Length]);
-            crc32BufferWriter.Advance((int)payload.Length);
+            payload.Seek(0, SeekOrigin.Begin);            
+            payload.ReadExactly(crc32MetadataStart.Span[(int)metadataMeasure.Length..]);
 
-            var crc32c = CRC32C.Crc(crc32Buffer.Memory.Span[..crc32Length]);
+            var crc32c = CRC32C.Crc(crc32Data.Span);
 
-            using var commandMeasure = Serializer.Measure(command);
-            var totalLength = 4 + (int)commandMeasure.Length + 2 + 4 + crc32Length;
+            // write crc32c value to start buffer
+            BinaryPrimitives.WriteUInt32BigEndian(crc32Buffer.Span, crc32c);
 
-            var pipeWriter = PipeWriter.Create(stream);
-
-            Span<byte> lengthBuffer = stackalloc byte[4];
-            // write total length
-            BinaryPrimitives.WriteInt32BigEndian(lengthBuffer, totalLength);
-            pipeWriter.Write(lengthBuffer);
-
-            // write command length
-            BinaryPrimitives.WriteInt32BigEndian(lengthBuffer, (int)commandMeasure.Length);
-            pipeWriter.Write(lengthBuffer);
-
-            // write command
-            commandMeasure.Serialize(pipeWriter);
-
-            // write magic number
-            pipeWriter.Write(s_magicNumber);
-
-            // write crc32c value
-            BinaryPrimitives.WriteUInt32BigEndian(lengthBuffer, crc32c);
-            pipeWriter.Write(lengthBuffer);
-
-            // write rest
-            pipeWriter.Write(crc32Buffer.Memory.Span[..crc32Length]);
-            return pipeWriter.CompleteAsync();
+            bufferWriter.Advance(crc32Length);
         }
 
 
