@@ -24,7 +24,7 @@ let DEFAULT_MAX_MESSAGE_SIZE = 5_242_880 //5 * 1024 * 1024
 
 
 let private serializeSimpleCommand (command : BaseCommand) =
-    (fun output ->
+    (fun (output: WriterStream) ->
         use temp = MemoryStreamManager.GetStream()
         use binaryWriter = new BinaryWriter(temp)
 
@@ -47,11 +47,10 @@ let private serializeSimpleCommand (command : BaseCommand) =
 
 
 let private serializePayloadCommand (command: BaseCommand) (metadata: MessageMetadata) (payload: MemoryStream) =
-    (fun (output: Stream) ->
-        let writer = PipeWriter.Create(output, new StreamPipeWriterOptions(leaveOpen = true))
-        CommandSerializer.WritePayloadCommand(writer, command, metadata, payload)
+    (fun (output: WriterStream) ->
+        CommandSerializer.WritePayloadCommand(output, command, metadata, payload)
         payload.Dispose()
-        writer.CompleteAsync().AsTask()
+        unitTask :>Task
         ),
     command.``type``
 

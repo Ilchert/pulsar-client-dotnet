@@ -402,12 +402,12 @@ type MessageBuilder =
     static member DisableReplication =
         DisableReplication
 
-type internal WriterStream = Stream
+type internal WriterStream = PipeWriter
 type internal SendTask = (WriterStream -> Task) * BaseCommand.Type
 type internal Connection =
     {
         Input: PipeReader
-        Output: WriterStream
+        Output: PipeWriter
         Dispose: unit -> unit
     }
 type internal RedeliverSet = HashSet<MessageId>
